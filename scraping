@@ -1,0 +1,14 @@
+from requests_html import HTMLSession
+import pandas as pd
+from bs4 import BeautifulSoup
+
+URL = 'https://aws.amazon.com/ec2/spot/instance-advisor/'
+
+ses = HTMLSession()
+
+r = ses.get(URL)
+
+el = r.html.find('tbody', first=True)
+
+print(r)
+
