@@ -1,0 +1,30 @@
+name: cs236781-hw2
+channels:
+  - pytorch
+  - defaults
+  - conda-forge
+dependencies:
+  # common
+  - python=3.8.*
+  - ipython
+  - jupyter
+  - jupyterlab
+  - nodejs>=12.0
+  - matplotlib
+  - numpy
+  - scikit-learn
+  - scipy
+  - pytest
+  - pandas
+  - tqdm
+  - graphviz
+  - pip
+  - pip:
+    - nbmerge
+    - torchviz
+  # pytorch
+  - pytorch=1.10
+  - cudatoolkit
+  - torchvision
+  - torchtext
+
