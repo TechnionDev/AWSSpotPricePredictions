@@ -1,3 +1,6 @@
+import threading
+import time
+
 import boto3
 import json
 import os
@@ -19,14 +22,17 @@ TIMESTAMP = 'Timestamp'
 ITEMS = 'SpotPriceHistory'
 EXTRACT_KEYS = [PRICE, TIMESTAMP]
 FILENAME = 'SpotPriceHistory.json'
-PAGE_LIMIT = 200
+PAGE_LIMIT = 50000
 measurements = None
+threadLock = None
+finished = 0
+
 
 # If running in different threads, the clients must operate over different regions as to block racing
 
 
 def get_info_using_client(region_name):
-    global measurements
+    global measurements, finished
     client = boto3.client('ec2', region_name=region_name)
     logging.info(f'Client for region {region_name} initialized')
 
@@ -34,10 +40,15 @@ def get_info_using_client(region_name):
     #            {'Name': 'availability-zone', 'Values': ['us-west-2a']},
     #            {'Name': 'product-description', 'Values': ['Linux/UNIX']}]
 
-    h = client.describe_spot_price_history()  # Filters=filters
+    if region_name not in measurements:
+        measurements[region_name] = {}
+    if 'next_token' in measurements[region_name] and measurements[region_name]['next_token'] is not None:
+        h = client.describe_spot_price_history(NextToken=measurements[region_name]['next_token'])
+    else:
+        h = client.describe_spot_price_history()  # Filters=filters
 
     for i in range(PAGE_LIMIT):
-        if i%10 == 0:
+        if i % 10 == 0:
             logging.info(f'Finished {i} pages from region {region_name}')
         if len(h[ITEMS]) == 0:
             logging.debug(f'No items in page: {i}. Early stopping ;-)')
@@ -57,23 +68,42 @@ def get_info_using_client(region_name):
             extracted = {k: str(entry[k]) for k in EXTRACT_KEYS}
 
             if len(measurements[entry[ZONE]][entry[ITYPE]][entry[OS]]) == 0 \
-                or measurements[entry[ZONE]][entry[ITYPE]][entry[OS]][-1][PRICE] != extracted[PRICE] \
+                    or measurements[entry[ZONE]][entry[ITYPE]][entry[OS]][-1][PRICE] != extracted[PRICE] \
                     and extracted not in measurements[entry[ZONE]][entry[ITYPE]][entry[OS]]:
-                measurements[entry[ZONE]][entry[ITYPE]
-                                          ][entry[OS]] += [extracted]
+                measurements[entry[ZONE]][entry[ITYPE]][entry[OS]] += [extracted]
 
+        measurements[region_name]['next_token'] = h['NextToken']
         h = client.describe_spot_price_history(NextToken=h['NextToken'])
     else:
         logging.warning(
             f'WARNING: Region {region_name} has more than {PAGE_LIMIT} pages')
 
     logging.info(f'Done fetching for region {region_name}')
+    finished += 1
+
+
+def save_measurements(checkpoint=False):
+    global measurements
+    threadLock.acquire()
+    logging.info(f'Saving measurements. Checkpoint: {checkpoint}')
+    measurements['Modified'] = str(datetime.now())
+
+    try:
+        with open(FILENAME, mode='w') as fp:
+            json.dump(measurements, fp)
+    except:
+        os.remove(FILENAME)
+        threadLock.release()
+        raise
+
+    threadLock.release()
 
 
 def main():
-    global measurements
+    global measurements, threadLock
 
     logging.info(f"Execution started")
+    threadLock = threading.Lock()
 
     orig_measurements = None
 
@@ -93,8 +123,16 @@ def main():
     region_names = [x['RegionName'] for x in regions]
 
     # Run threadpool
-    with ThreadPool(processes=10) as pool:
-        pool.map(get_info_using_client, region_names)
+    with ThreadPool(processes=30) as pool:
+        pool.map_async(get_info_using_client, region_names)
+        while finished < len(region_names):
+            if orig_measurements == measurements:
+                logging.warning(
+                    f"WARNING: No new information since {measurements['Modified']}")
+            else:
+                measurements['Modified'] = str(datetime.now())
+                save_measurements(checkpoint=True)
+            time.sleep(120)
         # pool.join()
 
     if orig_measurements == measurements:
@@ -102,13 +140,14 @@ def main():
             f"WARNING: No new information since {measurements['Modified']}")
     else:
         measurements['Modified'] = str(datetime.now())
+        save_measurements(checkpoint=False)
 
-    try:
-        with open(FILENAME, mode='w') as fp:
-            json.dump(measurements, fp)
-    except:
-        os.remove(FILENAME)
-        raise
+    # try:
+    #     with open(FILENAME, mode='w') as fp:
+    #         json.dump(measurements, fp)
+    # except:
+    #     os.remove(FILENAME)
+    #     raise
 
     logging.info('DONE')
 

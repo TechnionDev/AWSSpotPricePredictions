@@ -1,5 +1,6 @@
 import json
 import pickle
+import os
 
 ZONE = 'AvailabilityZone'
 ITYPE = 'InstanceType'
