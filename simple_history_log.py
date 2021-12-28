@@ -25,7 +25,9 @@ FILENAME = 'SpotPriceHistory.json'
 PAGE_LIMIT = 50000
 measurements = None
 threadLock = None
+saving_sem = None
 finished = 0
+max_threads = 30
 
 
 # If running in different threads, the clients must operate over different regions as to block racing
@@ -48,12 +50,14 @@ def get_info_using_client(region_name):
         h = client.describe_spot_price_history()  # Filters=filters
 
     for i in range(PAGE_LIMIT):
+        if threadLock.locked():
+            time.sleep(5)
+        saving_sem.acquire()
         if i % 10 == 0:
             logging.info(f'Finished {i} pages from region {region_name}')
         if len(h[ITEMS]) == 0:
             logging.debug(f'No items in page: {i}. Early stopping ;-)')
             break
-
         for entry in h[ITEMS]:
             if entry[ZONE] not in measurements:
                 measurements[entry[ZONE]] = {entry[ITYPE]: {entry[OS]: []}}
@@ -73,6 +77,7 @@ def get_info_using_client(region_name):
                 measurements[entry[ZONE]][entry[ITYPE]][entry[OS]] += [extracted]
 
         measurements[region_name]['next_token'] = h['NextToken']
+        saving_sem.release()
         h = client.describe_spot_price_history(NextToken=h['NextToken'])
     else:
         logging.warning(
@@ -84,15 +89,25 @@ def get_info_using_client(region_name):
 
 def save_measurements(checkpoint=False):
     global measurements
+
     threadLock.acquire()
+    for _ in range(max_threads):
+        saving_sem.acquire()
+    # time.sleep(3)  # Let threads notice that we're saving something
     logging.info(f'Saving measurements. Checkpoint: {checkpoint}')
     measurements['Modified'] = str(datetime.now())
 
+    str_dump = json.dumps(measurements)
+
+    saving_sem.release(n=max_threads)
+
     try:
-        with open(FILENAME, mode='w') as fp:
-            json.dump(measurements, fp)
-    except:
-        os.remove(FILENAME)
+        with open(FILENAME+'.tmp', mode='w') as fp:
+            fp.write(str_dump)
+        logging.debug('Running cmd: ' + (cmd := f'mv "{FILENAME+".tmp"}" "{FILENAME}" &'))
+        os.system(cmd)
+    except Exception as e:
+        os.remove(FILENAME+'.tmp')
         threadLock.release()
         raise
 
@@ -100,10 +115,11 @@ def save_measurements(checkpoint=False):
 
 
 def main():
-    global measurements, threadLock
+    global measurements, threadLock, saving_sem
 
     logging.info(f"Execution started")
     threadLock = threading.Lock()
+    saving_sem = threading.Semaphore(max_threads)
 
     orig_measurements = None
 
@@ -123,7 +139,7 @@ def main():
     region_names = [x['RegionName'] for x in regions]
 
     # Run threadpool
-    with ThreadPool(processes=30) as pool:
+    with ThreadPool(processes=max_threads) as pool:
         pool.map_async(get_info_using_client, region_names)
         while finished < len(region_names):
             if orig_measurements == measurements:
